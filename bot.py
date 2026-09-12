@@ -3,6 +3,10 @@ import telebot
 import os
 from datetime import datetime, timedelta
 from supabase import create_client, Client
+import logging
+
+# --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- НАСТРОЙКИ SUPABASE ---
 SUPABASE_URL = "https://qbykbcpecshkveedvswy.supabase.co"
@@ -16,22 +20,30 @@ app = Flask(__name__)
 
 # --- ПРОВЕРКА ПОДПИСКИ ---
 def check_subscription(user_id):
-    response = supabase.table('reminders').select('start_date').eq('user_id', user_id).limit(1).execute()
-    data = response.data
-    
-    if not data:
-        start_date = datetime.now().isoformat()
-        supabase.table('reminders').insert({
-            'user_id': user_id,
-            'text': 'Привет!',
-            'start_date': start_date
-        }).execute()
-        return True
-    else:
-        start_date = datetime.fromisoformat(data[0]['start_date'])
-        if datetime.now() - start_date > timedelta(days=7):
-            return False
-        return True
+    try:
+        response = supabase.table('reminders').select('start_date').eq('user_id', user_id).limit(1).execute()
+        data = response.data
+        logging.info(f"Проверка подписки для {user_id}: {data}")
+        
+        if not data:
+            start_date = datetime.now().isoformat()
+            supabase.table('reminders').insert({
+                'user_id': user_id,
+                'text': 'Привет!',
+                'start_date': start_date
+            }).execute()
+            logging.info(f"Новый пользователь {user_id} добавлен в базу")
+            return True
+        else:
+            start_date = datetime.fromisoformat(data[0]['start_date'])
+            if datetime.now() - start_date > timedelta(days=7):
+                logging.info(f"Подписка пользователя {user_id} истекла")
+                return False
+            logging.info(f"Подписка пользователя {user_id} активна")
+            return True
+    except Exception as e:
+        logging.error(f"Ошибка в check_subscription: {e}")
+        return True  # В случае ошибки пропускаем (чтобы бот не блокировал)
 
 # --- СЕКРЕТНАЯ КОМАНДА ДЛЯ ПРОДЛЕНИЯ (ТОЛЬКО ДЛЯ ТЕБЯ) ---
 @bot.message_handler(commands=['extend'])
@@ -49,12 +61,15 @@ def extend_subscription(message):
         new_date = (datetime.now() + timedelta(days=30)).isoformat()
         supabase.table('reminders').update({'start_date': new_date}).eq('user_id', user_id).execute()
         bot.reply_to(message, f"✅ Подписка для {user_id} продлена на 30 дней.")
+        logging.info(f"Подписка для {user_id} продлена до {new_date}")
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {e}")
+        logging.error(f"Ошибка в extend: {e}")
 
 # --- ОСНОВНЫЕ КОМАНДЫ ---
 @bot.message_handler(commands=['start'])
 def start(message):
+    logging.info(f"Получен /start от {message.chat.id}")
     user_id = message.chat.id
     if check_subscription(user_id):
         bot.reply_to(message, 
@@ -71,22 +86,29 @@ def start(message):
 
 @bot.message_handler(commands=['list'])
 def list_reminders(message):
+    logging.info(f"Получен /list от {message.chat.id}")
     user_id = message.chat.id
     if not check_subscription(user_id):
         bot.reply_to(message, "⛔ Подписка истекла. Оплати доступ.")
         return
     
-    response = supabase.table('reminders').select('id, text').eq('user_id', user_id).neq('text', 'Привет!').execute()
-    rows = response.data
-    
-    if rows:
-        answer = "📋 Твои дела:\n" + "\n".join([f"{row['id']}. {row['text']}" for row in rows])
-    else:
-        answer = "🎉 У тебя пока нет дел!"
-    bot.reply_to(message, answer)
+    try:
+        response = supabase.table('reminders').select('id, text').eq('user_id', user_id).neq('text', 'Привет!').execute()
+        rows = response.data
+        logging.info(f"Найдено дел для {user_id}: {len(rows)}")
+        
+        if rows:
+            answer = "📋 Твои дела:\n" + "\n".join([f"{row['id']}. {row['text']}" for row in rows])
+        else:
+            answer = "🎉 У тебя пока нет дел!"
+        bot.reply_to(message, answer)
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+        logging.error(f"Ошибка в list: {e}")
 
 @bot.message_handler(commands=['delete'])
 def delete_reminder(message):
+    logging.info(f"Получен /delete от {message.chat.id}")
     user_id = message.chat.id
     if not check_subscription(user_id):
         bot.reply_to(message, "⛔ Подписка истекла.")
@@ -99,22 +121,30 @@ def delete_reminder(message):
         reminder_id = int(parts[1])
         supabase.table('reminders').delete().eq('id', reminder_id).eq('user_id', user_id).execute()
         bot.reply_to(message, f"✅ Дело №{reminder_id} удалено.")
+        logging.info(f"Дело {reminder_id} удалено для {user_id}")
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {e}")
+        logging.error(f"Ошибка в delete: {e}")
 
 @bot.message_handler(func=lambda message: True)
 def save_reminder(message):
+    logging.info(f"Получено сообщение от {message.chat.id}: {message.text}")
     user_id = message.chat.id
     if not check_subscription(user_id):
         bot.reply_to(message, "⛔ Подписка истекла.")
         return
-    text = message.text
-    supabase.table('reminders').insert({
-        'user_id': user_id,
-        'text': text,
-        'start_date': datetime.now().isoformat()
-    }).execute()
-    bot.reply_to(message, f"✅ Запомнил: «{text}».")
+    try:
+        text = message.text
+        supabase.table('reminders').insert({
+            'user_id': user_id,
+            'text': text,
+            'start_date': datetime.now().isoformat()
+        }).execute()
+        bot.reply_to(message, f"✅ Запомнил: «{text}».")
+        logging.info(f"Дело «{text}» добавлено для {user_id}")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+        logging.error(f"Ошибка в save_reminder: {e}")
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
