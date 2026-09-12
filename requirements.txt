@@ -1,2 +1,5 @@
 Flask
 pyTelegramBotAPI
+Flask
+pyTelegramBotAPI
+supabase
