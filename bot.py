@@ -1,35 +1,34 @@
 from flask import Flask, request
 import telebot
-import sqlite3
 import os
 from datetime import datetime, timedelta
+from supabase import create_client, Client
 
+# --- НАСТРОЙКИ SUPABASE ---
+SUPABASE_URL = "https://qbykbcpecshkveedvswy.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFieWtiY3BlY3Noa3ZlZWR2c3d5Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4OTIyNzU3MywiZXhwIjoyMTA0ODAzNTczfQ.O38QK3bkzG9WWrURjsTsdI9S6IV_5hLkSQT0rG2JdtA"
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# --- НАСТРОЙКИ БОТА ---
 TOKEN = "8893691800:AAH3dIYh9TDqPFZV4TKSjOzEB1n5XcIA-zM"
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# --- БАЗА ДАННЫХ ---
-db_path = os.path.join(os.path.dirname(__file__), 'reminders.db')
-conn = sqlite3.connect(db_path, check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute('''CREATE TABLE IF NOT EXISTS reminders
-                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                   user_id INTEGER, 
-                   text TEXT, 
-                   start_date TEXT)''')
-conn.commit()
-
 # --- ПРОВЕРКА ПОДПИСКИ ---
 def check_subscription(user_id):
-    cursor.execute("SELECT start_date FROM reminders WHERE user_id=? LIMIT 1", (user_id,))
-    result = cursor.fetchone()
-    if result is None:
+    response = supabase.table('reminders').select('start_date').eq('user_id', user_id).limit(1).execute()
+    data = response.data
+    
+    if not data:
         start_date = datetime.now().isoformat()
-        cursor.execute("INSERT INTO reminders (user_id, text, start_date) VALUES (?, ?, ?)", (user_id, "Привет!", start_date))
-        conn.commit()
+        supabase.table('reminders').insert({
+            'user_id': user_id,
+            'text': 'Привет!',
+            'start_date': start_date
+        }).execute()
         return True
     else:
-        start_date = datetime.fromisoformat(result[0])
+        start_date = datetime.fromisoformat(data[0]['start_date'])
         if datetime.now() - start_date > timedelta(days=7):
             return False
         return True
@@ -37,7 +36,7 @@ def check_subscription(user_id):
 # --- СЕКРЕТНАЯ КОМАНДА ДЛЯ ПРОДЛЕНИЯ (ТОЛЬКО ДЛЯ ТЕБЯ) ---
 @bot.message_handler(commands=['extend'])
 def extend_subscription(message):
-    YOUR_ID = 8490191572  # ТВОЙ ID
+    YOUR_ID = 8490191572
     if message.chat.id != YOUR_ID:
         bot.reply_to(message, "⛔ Доступ запрещен.")
         return
@@ -48,11 +47,10 @@ def extend_subscription(message):
             return
         user_id = int(parts[1])
         new_date = (datetime.now() + timedelta(days=30)).isoformat()
-        cursor.execute("UPDATE reminders SET start_date = ? WHERE user_id=?", (new_date, user_id))
-        conn.commit()
+        supabase.table('reminders').update({'start_date': new_date}).eq('user_id', user_id).execute()
         bot.reply_to(message, f"✅ Подписка для {user_id} продлена на 30 дней.")
-    except:
-        bot.reply_to(message, "❌ Ошибка. Пиши: /extend USER_ID")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
 
 # --- ОСНОВНЫЕ КОМАНДЫ ---
 @bot.message_handler(commands=['start'])
@@ -77,10 +75,12 @@ def list_reminders(message):
     if not check_subscription(user_id):
         bot.reply_to(message, "⛔ Подписка истекла. Оплати доступ.")
         return
-    cursor.execute("SELECT id, text FROM reminders WHERE user_id=? AND text!='Привет!'", (user_id,))
-    rows = cursor.fetchall()
+    
+    response = supabase.table('reminders').select('id, text').eq('user_id', user_id).neq('text', 'Привет!').execute()
+    rows = response.data
+    
     if rows:
-        answer = "📋 Твои дела:\n" + "\n".join([f"{row[0]}. {row[1]}" for row in rows])
+        answer = "📋 Твои дела:\n" + "\n".join([f"{row['id']}. {row['text']}" for row in rows])
     else:
         answer = "🎉 У тебя пока нет дел!"
     bot.reply_to(message, answer)
@@ -97,14 +97,10 @@ def delete_reminder(message):
             bot.reply_to(message, "❌ Напиши: /delete 1")
             return
         reminder_id = int(parts[1])
-        cursor.execute("DELETE FROM reminders WHERE id=? AND user_id=?", (reminder_id, user_id))
-        conn.commit()
-        if cursor.rowcount > 0:
-            bot.reply_to(message, f"✅ Дело №{reminder_id} удалено.")
-        else:
-            bot.reply_to(message, "❌ Дело не найдено.")
-    except:
-        bot.reply_to(message, "❌ Ошибка. Пиши: /delete 1")
+        supabase.table('reminders').delete().eq('id', reminder_id).eq('user_id', user_id).execute()
+        bot.reply_to(message, f"✅ Дело №{reminder_id} удалено.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
 
 @bot.message_handler(func=lambda message: True)
 def save_reminder(message):
@@ -113,9 +109,11 @@ def save_reminder(message):
         bot.reply_to(message, "⛔ Подписка истекла.")
         return
     text = message.text
-    cursor.execute("INSERT INTO reminders (user_id, text, start_date) VALUES (?, ?, ?)", 
-                   (user_id, text, datetime.now().isoformat()))
-    conn.commit()
+    supabase.table('reminders').insert({
+        'user_id': user_id,
+        'text': text,
+        'start_date': datetime.now().isoformat()
+    }).execute()
     bot.reply_to(message, f"✅ Запомнил: «{text}».")
 
 @app.route('/webhook', methods=['POST'])
